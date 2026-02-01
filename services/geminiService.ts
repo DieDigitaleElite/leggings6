@@ -15,14 +15,13 @@ function getCleanBase64(dataUrl: string): string {
 }
 
 /**
- * Analysiert das Bild des Nutzers für eine Größenempfehlung.
+ * Analysiert das Bild des Nutzers für eine Größenempfehlung (Text-basiert).
  */
 export async function estimateSizeFromImage(userBase64: string, productName: string): Promise<string> {
   try {
-    // Strikt nach Vorgabe initialisieren
     const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
     const response = await ai.models.generateContent({
-      model: APP_CONFIG.MODEL_NAME,
+      model: APP_CONFIG.TEXT_MODEL,
       contents: {
         parts: [
           { 
@@ -46,23 +45,20 @@ export async function estimateSizeFromImage(userBase64: string, productName: str
 }
 
 /**
- * Erstellt die virtuelle Anprobe.
+ * Erstellt die virtuelle Anprobe (Bild-basiert).
  */
 export async function performVirtualTryOn(userBase64: string, productBase64: string, productName: string): Promise<string> {
-  // Überprüfung ob der Key überhaupt vorhanden ist (bevor der Request rausgeht)
-  if (!process.env.API_KEY || process.env.API_KEY === "undefined") {
-    throw new Error("API_KEY ist im Browser nicht verfügbar. Bitte stelle sicher, dass die Umgebungsvariable 'API_KEY' korrekt gesetzt und die App neu deployed wurde.");
+  const apiKey = process.env.API_KEY;
+  if (!apiKey || apiKey === "undefined") {
+    throw new Error("API_KEY fehlt.");
   }
 
   try {
-    const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
+    const ai = new GoogleGenAI({ apiKey });
     
-    const promptText = `VIRTUAL TRY-ON: Place the outfit from the second image onto the person in the first image. 
-    Product: ${productName}. Keep the person's face, pose, and the background identical to the first image. 
-    Output the final image where the person is wearing the new outfit.`;
-
+    // WICHTIG: Verwende das IMAGE_MODEL für Bild-Ausgabe
     const response = await ai.models.generateContent({
-      model: APP_CONFIG.MODEL_NAME,
+      model: APP_CONFIG.IMAGE_MODEL,
       contents: {
         parts: [
           { 
@@ -77,33 +73,35 @@ export async function performVirtualTryOn(userBase64: string, productBase64: str
               mimeType: getMimeType(productBase64) 
             } 
           },
-          { text: promptText },
+          { text: `VIRTUAL TRY-ON: Take the outfit from the second image and put it on the person in the first image. Product: ${productName}. The person, pose and background must remain the same as in image 1. Return the generated image.` },
         ],
       }
     });
 
-    if (!response?.candidates?.[0]?.content?.parts) {
-      throw new Error("Die KI hat keine Bilddaten zurückgegeben.");
-    }
-
-    for (const part of response.candidates[0].content.parts) {
-      if (part.inlineData?.data) {
-        return `data:image/png;base64,${part.inlineData.data}`;
+    // Suche nach dem Bild-Teil in der Antwort
+    const candidate = response.candidates?.[0];
+    if (candidate?.content?.parts) {
+      for (const part of candidate.content.parts) {
+        if (part.inlineData?.data) {
+          return `data:image/png;base64,${part.inlineData.data}`;
+        }
       }
     }
 
-    throw new Error("Das Ergebnis enthielt keine gültigen Bilddaten.");
+    throw new Error("Kein Bild generiert. Das Modell hat möglicherweise nur Text geantwortet.");
   } catch (error: any) {
-    console.error("Gemini API Error:", error);
+    console.error("Critical Gemini Error:", error);
     
-    const status = error.status || "";
-    const message = error.message || "";
-
-    if (message.includes("API key not valid") || status === "INVALID_ARGUMENT") {
-      throw new Error("Der API Key wird von Google als ungültig abgelehnt. Bitte prüfe in der Google AI Studio Console, ob der Key aktiv ist und keine Einschränkungen (Restrictions) hat.");
+    // Detaillierte Fehlermeldung für den User
+    const errorMsg = error.message || "";
+    if (errorMsg.includes("400")) {
+      throw new Error("Fehler 400: Das Bild konnte nicht verarbeitet werden oder das Modell ist nicht verfügbar. Bitte versuche es mit einem anderen Foto.");
+    }
+    if (errorMsg.includes("API key not valid")) {
+      throw new Error("Der API-Key wird nicht akzeptiert. Bitte prüfe deine Umgebungsvariablen.");
     }
     
-    throw new Error(message || "Ein Fehler bei der Bildgenerierung ist aufgetreten.");
+    throw new Error("Anproben-Fehler: " + (error.message || "Unbekannter Fehler"));
   }
 }
 

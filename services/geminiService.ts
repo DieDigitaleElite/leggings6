@@ -14,16 +14,46 @@ function getCleanBase64(dataUrl: string): string {
   return dataUrl.replace(/^data:[^;]+;base64,/, "");
 }
 
+/**
+ * Nutzt Gemini 3 Flash für Text-Analyse (Größenempfehlung)
+ */
+export async function estimateSizeFromImage(userBase64: string, productName: string): Promise<string> {
+  try {
+    const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
+    const response = await ai.models.generateContent({
+      model: APP_CONFIG.TEXT_MODEL,
+      contents: {
+        parts: [
+          { inlineData: { data: getCleanBase64(userBase64), mimeType: getMimeType(userBase64) } },
+          { text: `Analysiere die Person auf dem Bild. Welche Kleidergröße (XS, S, M, L, XL, XXL) passt ihr am besten für das Produkt "${productName}"? Antworte NUR mit dem Code.` }
+        ]
+      }
+    });
+    const size = response.text?.trim().toUpperCase() || 'M';
+    const validSizes = ['XS', 'S', 'M', 'L', 'XL', 'XXL'];
+    return validSizes.find(s => size.includes(s)) || 'M';
+  } catch (error) {
+    console.error("Size Estimation Error:", error);
+    return 'M';
+  }
+}
+
+/**
+ * Nutzt Gemini 2.5 Flash Image für die Bild-zu-Bild Bearbeitung (Anprobe)
+ * Basierend auf der funktionierenden Legacy-Version der App.
+ */
 export async function performVirtualTryOn(userBase64: string, productBase64: string, productName: string): Promise<string> {
+  const apiKey = process.env.API_KEY;
+  if (!apiKey) throw new Error("API_KEY nicht konfiguriert.");
+
   const userMimeType = getMimeType(userBase64);
   const productMimeType = getMimeType(productBase64);
   
   const cleanUserBase64 = getCleanBase64(userBase64);
   const cleanProductBase64 = getCleanBase64(productBase64);
 
-  const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
+  const ai = new GoogleGenAI({ apiKey });
   
-  // Maximal restriktiver Prompt für absolute Design-Treue
   const promptText = `
     CRITICAL TASK: Absolute High-Fidelity Virtual Try-On.
     
@@ -47,7 +77,7 @@ export async function performVirtualTryOn(userBase64: string, productBase64: str
 
   try {
     const response = await ai.models.generateContent({
-      model: APP_CONFIG.MODEL_NAME,
+      model: APP_CONFIG.IMAGE_MODEL,
       contents: {
         parts: [
           { inlineData: { data: cleanUserBase64, mimeType: userMimeType } },
@@ -56,7 +86,7 @@ export async function performVirtualTryOn(userBase64: string, productBase64: str
         ],
       },
       config: {
-        temperature: 0.1, // Minimum temperature to ensure consistent, non-creative reproduction
+        temperature: 0.1,
       }
     });
 
@@ -66,45 +96,28 @@ export async function performVirtualTryOn(userBase64: string, productBase64: str
 
     const candidate = response.candidates[0];
     
-    if (candidate.finishReason) {
-      if (candidate.finishReason === 'SAFETY') {
-        throw new Error("Das Foto wurde blockiert. Bitte nutze ein Bild mit neutralerer Pose.");
-      } else if (candidate.finishReason === 'OTHER' || (candidate.finishReason as string) === 'IMAGE_OTHER') {
-        throw new Error("Die KI konnte das Bild aufgrund technischer Einschränkungen nicht bearbeiten.");
-      }
-    }
-
-    if (!candidate.content || !candidate.content.parts) {
-      throw new Error("Ungültige Antwortstruktur der KI.");
+    if (candidate.finishReason === 'SAFETY') {
+      throw new Error("Das Foto wurde blockiert. Bitte nutze ein Bild mit neutralerer Pose.");
     }
 
     let generatedImageUrl: string | null = null;
-    for (const part of candidate.content.parts) {
-      if (part.inlineData && part.inlineData.data) {
-        generatedImageUrl = `data:image/png;base64,${part.inlineData.data}`;
-        break;
+    if (candidate.content && candidate.content.parts) {
+      for (const part of candidate.content.parts) {
+        if (part.inlineData && part.inlineData.data) {
+          generatedImageUrl = `data:image/png;base64,${part.inlineData.data}`;
+          break;
+        }
       }
     }
 
     if (!generatedImageUrl) {
-      // Try using response.text as per instructions if no inline data is found
-      const text = response.text;
-      if (text) {
-        throw new Error(`KI-Feedback: ${text}`);
-      }
-      throw new Error("Kein Bild generiert. Bitte anderes Foto versuchen.");
+      throw new Error("Fehler 400: Das Bild konnte nicht verarbeitet werden. Bitte versuche es mit einem anderen Foto.");
     }
 
     return generatedImageUrl;
   } catch (error: any) {
-    console.error("Gemini Try-On Detail Error:", error);
-    
-    const errorMessage = error.message || "";
-    if (errorMessage.includes("IMAGE_OTHER") || errorMessage.includes("OTHER")) {
-      throw new Error("Das Bild konnte nicht generiert werden. Bitte nutze ein schärferes Foto mit weniger Falten in der Kleidung.");
-    }
-    
-    throw new Error(error.message || "Fehler bei der Anprobe.");
+    console.error("Gemini Try-On Error:", error);
+    throw new Error(error.message || "Fehler bei der Anprobe. Bitte versuche es erneut.");
   }
 }
 
